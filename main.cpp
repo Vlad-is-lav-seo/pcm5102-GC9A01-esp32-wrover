@@ -22,8 +22,8 @@ BluetoothA2DPSink a2dp_sink;
 #define VOL_DOWN_PIN   27
 
 // ===== WiFi Settings =====
-const char* ssid = "Co-vid";
-const char* password = "zadolbala";
+const char* ssid = "wifi";
+const char* password = "pass";
 
 // ===== State =====
 bool bluetoothConnected = false;
