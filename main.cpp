@@ -22,7 +22,7 @@ BluetoothA2DPSink a2dp_sink;
 #define VOL_DOWN_PIN   27
 
 // ===== WiFi Settings =====
-const char* ssid = "wifi";
+const char* ssid = "Covid";
 const char* password = "pass";
 
 // ===== State =====
