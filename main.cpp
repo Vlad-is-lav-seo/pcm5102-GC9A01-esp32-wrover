@@ -7,8 +7,8 @@
 #include "RTClib.h"
 
 // ==== WiFi ====
-const char* ssid = "Covid";
-const char* password = "pass";
+const char* ssid = "Co-vid";
+const char* password = "zadolbala";
 
 // ==== I2S Pins ====
 #define I2S_BCLK 26
@@ -297,15 +297,13 @@ void drawLargeDigitalClock(bool forceUpdate) {
   if (needsUpdate) {
     tft.fillScreen(TFT_BLACK);
     
-    // Извлекаем часы и минуты (первые 5 символов "HH:MM")
-    String timeWithoutSeconds = currentTime.substring(0, 5);
-    
+    // ИСПРАВЛЕНИЕ 1: Уменьшаем шрифт с 6 до 4 и показываем полное время с секундами
     tft.setTextDatum(MC_DATUM);
     tft.setTextColor(TFT_CYAN);
-    tft.setTextSize(6); // УВЕЛИЧЕН РАЗМЕР ШРИФТА ДО 6 (было 4)
+    tft.setTextSize(4); // УМЕНЬШЕН РАЗМЕР ШРИФТА ДО 4 (было 6)
     
-    // Рисуем время по центру экрана
-    tft.drawString(timeWithoutSeconds, 120, 120);
+    // Рисуем полное время с секундами "HH:MM:SS" по центру экрана
+    tft.drawString(currentTime, 120, 120);
     
     lastRTCTime = currentTime;
   }
@@ -383,10 +381,13 @@ void updateAnalogClock() {
   // Рисуем новые стрелки
   tft.drawLine(CLOCK_CENTER_X, CLOCK_CENTER_Y, last_hx, last_hy, TFT_WHITE); // Часовая - белая
   tft.drawLine(CLOCK_CENTER_X, CLOCK_CENTER_Y, last_mx, last_my, TFT_CYAN);  // Минутная - голубая
-  tft.drawLine(CLOCK_CENTER_X, CLOCK_CENTER_Y, last_sx, last_sy, TFT_RED);   // Секундная - красная
   
-  // Рисуем текущую секундную точку
+  // ИСПРАВЛЕНИЕ 3: Сначала рисуем секундную точку, потом секундную стрелку
+  // Рисуем текущую секундную точку ПЕРЕД секундной стрелкой
   drawDotAtSecond(now.second(), TFT_RED);
+  
+  // Теперь рисуем секундную стрелку ПОВЕРХ точки
+  tft.drawLine(CLOCK_CENTER_X, CLOCK_CENTER_Y, last_sx, last_sy, TFT_RED);   // Секундная - красная
 }
 
 void drawDotAtSecond(uint8_t sec, uint16_t color) {
@@ -991,16 +992,22 @@ void audio_showstation(const char *info) {
 //                           AUDIO TASK
 // ---------------------------------------------------------------------
 void audioTask(void* parameter) {
+  unsigned long lastWiFiReconnect = 0; // Добавляем таймер для WiFi
+  
   for (;;) {
     if (currentMode == MODE_RADIO) {
+      // ИСПРАВЛЕНИЕ 2: Проверяем WiFi только раз в 10 секунд вместо постоянных проверок
       if (!WiFi.isConnected()) {
-        connectToWiFi();
+        if (millis() - lastWiFiReconnect > 10000) { // Только раз в 10 секунд
+          connectToWiFi();
+          lastWiFiReconnect = millis();
+        }
       }
       if (wifiConnected) {
         audio.loop();
       }
     }
-    vTaskDelay(1);
+    vTaskDelay(1); // ВОЗВРАЩАЕМ ОБРАТНО 1 мс для плавного воспроизведения
   }
 }
 
