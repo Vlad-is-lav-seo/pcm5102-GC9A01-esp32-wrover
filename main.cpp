@@ -5,10 +5,11 @@
 #include <Preferences.h>
 #include <Wire.h>
 #include "RTClib.h"
+#include "BluetoothA2DPSink.h"
 
 // ==== WiFi ====
-const char* ssid = "Co-vid";
-const char* password = "zadolbala";
+const char* ssid = "Covid";
+const char* password = "pass";
 
 // ==== I2S Pins ====
 #define I2S_BCLK 26
@@ -30,6 +31,7 @@ TFT_eSPI tft = TFT_eSPI();
 Audio audio;
 Preferences preferences;
 RTC_DS1307 rtc;  // RTC объект
+BluetoothA2DPSink a2dp_sink;  // Bluetooth A2DP объект
 
 // ==== System Mode ====
 enum SystemMode {
@@ -99,6 +101,14 @@ unsigned long lastClockUpdate = 0;
 #define DOT_RADIUS 2
 #define TRACK_RADIUS 118  // Увеличено соответственно
 int16_t last_hx = 0, last_hy = 0, last_mx = 0, last_my = 0, last_sx = 0, last_sy = 0;
+
+// ==== BLUETOOTH Mode Variables ====
+bool bluetoothConnected = false;
+String btDeviceName = "ESP32-Radio";
+String btConnectionStatus = "Not connected";
+String btTrackName = "No track";
+String btArtistName = "";
+String btAlbumName = "";
 
 // ==== Tasks ====
 TaskHandle_t audioTaskHandle;
@@ -170,6 +180,14 @@ void drawClockFace();
 void updateAnalogClock();
 void drawDotAtSecond(uint8_t sec, uint16_t color);
 
+// ==== Bluetooth Functions ====
+void setupBluetooth();
+void stopBluetooth();
+void updateBluetoothInfo(bool forceUpdate = false);
+void avrc_metadata_callback(uint8_t id, const uint8_t *text);
+void connection_state_changed(esp_a2d_connection_state_t state, void *ptr);
+void audio_state_changed(esp_a2d_audio_state_t state, void *ptr);
+
 // WiFi event handler
 void wifi_event_handler(WiFiEvent_t event) {
   switch(event) {
@@ -192,6 +210,175 @@ void wifi_event_handler(WiFiEvent_t event) {
   // Notify UI task to redraw RSSI
   if (uiTaskHandle != NULL) {
     xTaskNotify(uiTaskHandle, 0, eNoAction);
+  }
+}
+
+// ---------------------------------------------------------------------
+//                    BLUETOOTH FUNCTIONS
+// ---------------------------------------------------------------------
+void setupBluetooth() {
+  Serial.println(">>> Setting up Bluetooth...");
+  
+  // Останавливаем радио если оно играет
+  if (currentMode == MODE_RADIO) {
+    stopRadio();
+  }
+  
+  // Отключаем WiFi для Bluetooth
+  disconnectFromWiFi();
+  
+  // Настройка I2S пинов
+  i2s_pin_config_t pin_config = {
+    .bck_io_num = I2S_BCLK,
+    .ws_io_num = I2S_LRC, 
+    .data_out_num = I2S_DOUT,
+    .data_in_num = I2S_PIN_NO_CHANGE
+  };
+  a2dp_sink.set_pin_config(pin_config);
+
+  // Настройка колбэков
+  a2dp_sink.set_avrc_metadata_callback(avrc_metadata_callback);
+  a2dp_sink.set_on_connection_state_changed(connection_state_changed);
+  a2dp_sink.set_on_audio_state_changed(audio_state_changed);
+  
+  // Включение метаданных
+  a2dp_sink.set_avrc_metadata_attribute_mask(ESP_AVRC_MD_ATTR_TITLE | ESP_AVRC_MD_ATTR_ARTIST | ESP_AVRC_MD_ATTR_ALBUM);
+
+  // Запуск Bluetooth
+  a2dp_sink.start("ESP32-Radio");
+  
+  // Установка громкости
+  int btVolume = map(volume, 0, 21, 0, 127);
+  a2dp_sink.set_volume(muted ? 0 : btVolume);
+
+  // Сброс статусов
+  bluetoothConnected = false;
+  btConnectionStatus = "Not connected";
+  btDeviceName = "ESP32-Radio";
+  btTrackName = "No track";
+  btArtistName = "";
+  btAlbumName = "";
+  
+  Serial.println(">>> Bluetooth started successfully");
+}
+
+void stopBluetooth() {
+  Serial.println(">>> Stopping Bluetooth...");
+  
+  a2dp_sink.end();
+  
+  bluetoothConnected = false;
+  btConnectionStatus = "Bluetooth Off";
+  btDeviceName = "ESP32-Radio";
+  btTrackName = "No track";
+  btArtistName = "";
+  btAlbumName = "";
+  
+  Serial.println(">>> Bluetooth stopped");
+}
+
+void updateBluetoothInfo(bool forceUpdate) {
+  if (menuVisible || currentMode != MODE_BLUETOOTH) return;
+
+  String displayDevice = btDeviceName;
+  String displayStatus = btConnectionStatus;
+  String displayTrack = btTrackName;
+
+  // Обрезаем длинные строки
+  if (displayDevice.length() > 15) {
+    displayDevice = displayDevice.substring(0, 15) + "...";
+  }
+  if (displayTrack.length() > 25) {
+    displayTrack = displayTrack.substring(0, 25) + "...";
+  }
+
+  bool deviceChanged = (displayDevice != lastLine2);
+  bool statusChanged = (displayStatus != lastLine3);
+  bool trackChanged = (displayTrack != lastLine4);
+
+  if (forceUpdate || deviceChanged || statusChanged || trackChanged) {
+    drawUnifiedScreen(
+      displayDevice.c_str(),           // Строка 2: имя устройства
+      displayStatus.c_str(),           // Строка 3: статус подключения
+      displayTrack.c_str(),            // Строка 4: название трека
+      bluetoothConnected ? TFT_GREEN : TFT_ORANGE,
+      true,
+      forceUpdate
+    );
+  }
+}
+
+// Bluetooth metadata callback
+void avrc_metadata_callback(uint8_t id, const uint8_t *text) {
+  if (text == nullptr) return;
+  
+  String metadata = String((char*)text);
+  Serial.printf(">>> AVRC metadata: id=0x%x, text=%s\n", id, metadata.c_str());
+  
+  switch (id) {
+    case ESP_AVRC_MD_ATTR_TITLE:
+      btTrackName = metadata;
+      Serial.printf(">>> Track: %s\n", btTrackName.c_str());
+      break;
+      
+    case ESP_AVRC_MD_ATTR_ARTIST:
+      btArtistName = metadata;
+      Serial.printf(">>> Artist: %s\n", btArtistName.c_str());
+      // Используем артиста как имя устройства если подключены
+      if (bluetoothConnected && btDeviceName == "Connected") {
+        btDeviceName = metadata;
+      }
+      break;
+      
+    case ESP_AVRC_MD_ATTR_ALBUM:
+      btAlbumName = metadata;
+      Serial.printf(">>> Album: %s\n", btAlbumName.c_str());
+      break;
+  }
+  
+  // Уведомляем UI задачу о необходимости обновления
+  if (uiTaskHandle != NULL) {
+    xTaskNotify(uiTaskHandle, 0, eNoAction);
+  }
+}
+
+// Connection state callback
+void connection_state_changed(esp_a2d_connection_state_t state, void *ptr) {
+  Serial.printf(">>> Connection state changed: %d\n", state);
+  
+  if (state == ESP_A2D_CONNECTION_STATE_CONNECTED) {
+    bluetoothConnected = true;
+    btConnectionStatus = "Connected";
+    btDeviceName = "Connected";
+    Serial.println(">>> Bluetooth device connected!");
+  } else if (state == ESP_A2D_CONNECTION_STATE_DISCONNECTED) {
+    bluetoothConnected = false;
+    btConnectionStatus = "Not connected";
+    btDeviceName = "ESP32-Radio";
+    btTrackName = "No track";
+    btArtistName = "";
+    btAlbumName = "";
+    Serial.println(">>> Bluetooth disconnected");
+  }
+  
+  // Уведомляем UI задачу
+  if (uiTaskHandle != NULL) {
+    xTaskNotify(uiTaskHandle, 0, eNoAction);
+  }
+}
+
+// Audio state callback
+void audio_state_changed(esp_a2d_audio_state_t state, void *ptr) {
+  switch (state) {
+    case ESP_A2D_AUDIO_STATE_STARTED:
+      Serial.println(">>> Audio: STARTED");
+      break;
+    case ESP_A2D_AUDIO_STATE_STOPPED:
+      Serial.println(">>> Audio: STOPPED");
+      break;
+    default:
+      Serial.printf(">>> Audio state: %d\n", state);
+      break;
   }
 }
 
@@ -778,6 +965,10 @@ void initializeAudioForCurrentMode() {
   else if (currentMode == MODE_TEST) {
     initializeTestMode();
   }
+  // Для BLUETOOTH режима инициализируем Bluetooth
+  else if (currentMode == MODE_BLUETOOTH) {
+    setupBluetooth();
+  }
 }
 
 // ---------------------------------------------------------------------
@@ -821,6 +1012,12 @@ void updateVolumeDisplay(bool forceUpdate) {
     if (currentMode == MODE_RADIO || currentMode == MODE_BLUETOOTH || currentMode == MODE_AP) {
       // Для этих режимов обновляем только строку 4
       updateLine4Only(volumeText.c_str(), muted ? TFT_RED : TFT_YELLOW);
+      
+      // Для Bluetooth также обновляем громкость в A2DP
+      if (currentMode == MODE_BLUETOOTH) {
+        int btVolume = map(volume, 0, 21, 0, 127);
+        a2dp_sink.set_volume(muted ? 0 : btVolume);
+      }
     } else if (currentMode == MODE_TEST) {
       // TEST режим уже обновляет время в своей функции
       // Ничего не делаем здесь
@@ -855,14 +1052,7 @@ void drawCurrentModeScreen(bool forceUpdate) {
       break;
       
     case MODE_BLUETOOTH:
-      drawUnifiedScreen(
-        "BLUETOOTH",                   // Строка 2: режим
-        "Audio Ready",                 // Строка 3: статус
-        muted ? "MUTED" : ("VOL: " + String(volume)).c_str(), // Строка 4: громкость
-        muted ? TFT_RED : TFT_YELLOW,
-        true,
-        true
-      );
+      updateBluetoothInfo(true);
       break;
       
     case MODE_CLOCK:
@@ -1111,6 +1301,7 @@ void uiTask(void* parameter) {
   bool mutePressed = false;
   unsigned long lastRTCSync = 0;
   unsigned long lastClockRefresh = 0;
+  unsigned long lastBluetoothUpdate = 0;
 
   for (;;) {
     bool changed = false;
@@ -1121,6 +1312,14 @@ void uiTask(void* parameter) {
       // WiFi статус изменился - перерисовываем экран если в RADIO режиме
       if (currentMode == MODE_RADIO && !menuVisible) {
         drawCurrentModeScreen(true);
+      }
+    }
+
+    // Обновление Bluetooth информации каждые 500мс
+    if (currentMode == MODE_BLUETOOTH && !menuVisible) {
+      if (millis() - lastBluetoothUpdate >= 500) {
+        updateBluetoothInfo(false);
+        lastBluetoothUpdate = millis();
       }
     }
 
@@ -1140,6 +1339,10 @@ void uiTask(void* parameter) {
         updateClockDisplay(true);
         Serial.println("Clock mode changed to: " + String(currentClockMode));
         vTaskDelay(pdMS_TO_TICKS(200));
+      } else if (currentMode == MODE_BLUETOOTH && volume < 21) {
+        volume++; 
+        changed = true;
+        vTaskDelay(pdMS_TO_TICKS(200));
       }
     }
 
@@ -1158,6 +1361,10 @@ void uiTask(void* parameter) {
         updateClockDisplay(true);
         Serial.println("Clock mode changed to: " + String(currentClockMode));
         vTaskDelay(pdMS_TO_TICKS(200));
+      } else if (currentMode == MODE_BLUETOOTH && volume > 0) {
+        volume--; 
+        changed = true;
+        vTaskDelay(pdMS_TO_TICKS(200));
       }
     }
 
@@ -1173,9 +1380,14 @@ void uiTask(void* parameter) {
       if (pressDuration < 1000) {
         if (menuVisible) {
           selectMenuItem();
-        } else if (currentMode == MODE_RADIO) {
+        } else if (currentMode == MODE_RADIO || currentMode == MODE_BLUETOOTH) {
           muted = !muted; 
-          audio.setVolume(muted ? 0 : volume); 
+          if (currentMode == MODE_RADIO) {
+            audio.setVolume(muted ? 0 : volume); 
+          } else if (currentMode == MODE_BLUETOOTH) {
+            int btVolume = map(volume, 0, 21, 0, 127);
+            a2dp_sink.set_volume(muted ? 0 : btVolume);
+          }
           changed = true;
         }
       } else {
@@ -1214,6 +1426,12 @@ void uiTask(void* parameter) {
     }
     // Обновление RADIO режима
     else if (currentMode == MODE_RADIO && !menuVisible && (changed || lastVolume != volume || lastMute != muted)) {
+      updateVolumeDisplay(false);
+      lastVolume = volume; 
+      lastMute = muted;
+    }
+    // Обновление BLUETOOTH режима
+    else if (currentMode == MODE_BLUETOOTH && !menuVisible && (changed || lastVolume != volume || lastMute != muted)) {
       updateVolumeDisplay(false);
       lastVolume = volume; 
       lastMute = muted;
