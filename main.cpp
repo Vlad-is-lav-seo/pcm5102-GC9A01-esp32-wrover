@@ -112,7 +112,20 @@ const char* ntpServer = "pool.ntp.org";
 const long  gmtOffset_sec = 10800; // UTC+3
 const int   daylightOffset_sec = 0;
 
+// ==== УНИФИЦИРОВАННЫЕ КООРДИНАТЫ СТРОК ====
+#define LINE1_Y 40    // Иконка
+#define LINE2_Y 90    // Основная информация (крупный шрифт, зеленый)
+#define LINE3_Y 120   // Дополнительная информация (обычный шрифт, белый) 
+#define LINE4_Y 180   // Статус/громкость (внизу)
+
+// ==== Глобальные переменные для оптимизации ====
+String lastLine2 = "";
+String lastLine3 = ""; 
+String lastLine4 = "";
+
 // ==== Function Prototypes ====
+void drawUnifiedScreen(const char* line2, const char* line3, const char* line4, uint16_t line4Color = TFT_YELLOW, bool showIcon = true, bool forceUpdate = false);
+void updateLine4Only(const char* line4, uint16_t color = TFT_YELLOW);
 void drawCurrentModeScreen(bool forceUpdate = false);
 void updateTrackInfo(bool forceUpdate = false);
 void updateVolumeDisplay(bool forceUpdate = false);
@@ -156,6 +169,113 @@ void drawAnalogClock(bool forceUpdate);
 void drawClockFace();
 void updateAnalogClock();
 void drawDotAtSecond(uint8_t sec, uint16_t color);
+
+// WiFi event handler
+void wifi_event_handler(WiFiEvent_t event) {
+  switch(event) {
+    case ARDUINO_EVENT_WIFI_STA_CONNECTED:
+      Serial.println("WiFi Connected");
+      wifiConnected = true;
+      break;
+    case ARDUINO_EVENT_WIFI_STA_DISCONNECTED:
+      Serial.println("WiFi Disconnected");
+      wifiConnected = false;
+      break;
+    case ARDUINO_EVENT_WIFI_STA_GOT_IP:
+      Serial.println("WiFi Got IP: " + WiFi.localIP().toString());
+      wifiConnected = true;
+      break;
+    default:
+      break;
+  }
+  
+  // Notify UI task to redraw RSSI
+  if (uiTaskHandle != NULL) {
+    xTaskNotify(uiTaskHandle, 0, eNoAction);
+  }
+}
+
+// ---------------------------------------------------------------------
+//                    ОПТИМИЗИРОВАННАЯ ФУНКЦИЯ ОТРИСОВКИ
+// ---------------------------------------------------------------------
+void drawUnifiedScreen(const char* line2, const char* line3, const char* line4, 
+                      uint16_t line4Color, bool showIcon, bool forceUpdate) {
+  
+  bool needsUpdate = forceUpdate;
+  
+  // Проверяем изменения для каждой строки отдельно
+  if (line2 != NULL && String(line2) != lastLine2) {
+    needsUpdate = true;
+    lastLine2 = String(line2);
+  }
+  if (line3 != NULL && String(line3) != lastLine3) {
+    needsUpdate = true; 
+    lastLine3 = String(line3);
+  }
+  if (line4 != NULL && String(line4) != lastLine4) {
+    needsUpdate = true;
+    lastLine4 = String(line4);
+  }
+  
+  if (!needsUpdate) return;
+  
+  tft.fillScreen(TFT_BLACK);
+  tft.setTextDatum(MC_DATUM);
+
+  // Строка 1: Иконка (если нужно)
+  if (showIcon) {
+    switch(currentMode) {
+      case MODE_RADIO:
+        if (wifiConnected) {
+          int rssi = WiFi.RSSI();
+          int bars = rssiToBars(rssi);
+          drawWiFiIcon(120, LINE1_Y, bars, false);
+        } else {
+          drawWiFiIcon(120, LINE1_Y, 0, false);
+        }
+        break;
+      case MODE_BLUETOOTH: drawBluetoothIcon(120, LINE1_Y); break;
+      case MODE_CLOCK: drawClockIcon(120, LINE1_Y); break;
+      case MODE_AP: drawAPModeIcon(120, LINE1_Y); break;
+      case MODE_TEST: drawTestIcon(120, LINE1_Y); break;
+    }
+  }
+
+  // Строка 2: Основная информация (зеленая, крупный шрифт)
+  if (line2 != NULL) {
+    tft.setTextColor(TFT_GREEN);
+    tft.setTextSize(2);
+    tft.drawString(line2, 120, LINE2_Y);
+  }
+
+  // Строка 3: Дополнительная информация (белая, обычный шрифт)
+  if (line3 != NULL) {
+    tft.setTextColor(TFT_WHITE);
+    tft.setTextSize(1);
+    tft.drawString(line3, 120, LINE3_Y);
+  }
+
+  // Строка 4: Статус/громкость (цвет зависит от контекста)
+  if (line4 != NULL) {
+    tft.setTextColor(line4Color);
+    tft.setTextSize(2);
+    tft.drawString(line4, 120, LINE4_Y);
+  }
+}
+
+// ---------------------------------------------------------------------
+//                    ФУНКЦИЯ ЧАСТИЧНОГО ОБНОВЛЕНИЯ
+// ---------------------------------------------------------------------
+void updateLine4Only(const char* line4, uint16_t color) {
+  if (String(line4) != lastLine4) {
+    tft.fillRect(0, LINE4_Y - 10, 240, 20, TFT_BLACK);
+    tft.setTextColor(color);
+    tft.setTextSize(2);
+    tft.setTextDatum(MC_DATUM);
+    tft.drawString(line4, 120, LINE4_Y);
+    lastLine4 = String(line4);
+  }
+}
 
 // ---------------------------------------------------------------------
 //                           RTC INITIALIZATION
@@ -236,7 +356,7 @@ bool syncRTCFromNTP() {
 }
 
 // ---------------------------------------------------------------------
-//                           CLOCK MODE FUNCTIONS
+//                    ОПТИМИЗИРОВАННЫЕ CLOCK ФУНКЦИИ
 // ---------------------------------------------------------------------
 void updateClockDisplay(bool forceUpdate) {
   if (menuVisible || currentMode != MODE_CLOCK) return;
@@ -264,48 +384,57 @@ void updateClockDisplay(bool forceUpdate) {
 void drawNormalClock(bool forceUpdate) {
   String currentTime = getRTCTime();
   String currentDay = getRTCDayOfWeek();
+  String currentDate = getRTCDate();
 
-  bool needsUpdate = forceUpdate || 
-                    currentTime != lastRTCTime || 
-                    currentDay != lastRTCDay;
+  // Обновляем только при реальных изменениях
+  bool timeChanged = (currentTime != lastRTCTime);
+  bool dayChanged = (currentDay != lastRTCDay);
+  
+  if (forceUpdate || timeChanged || dayChanged) {
+    drawUnifiedScreen(
+      currentTime.c_str(),    // Строка 2: время
+      currentDay.c_str(),     // Строка 3: день недели  
+      currentDate.c_str(),    // Строка 4: дата
+      TFT_YELLOW,
+      true,
+      forceUpdate
+    );
 
-  if (needsUpdate) {
-    tft.fillRect(0, 70, 240, 80, TFT_BLACK);
-
-    tft.setTextDatum(MC_DATUM);
-    
-    // Верхняя строка - время
-    tft.setTextColor(TFT_CYAN);
-    tft.setTextSize(2);
-    tft.drawString(currentTime, 120, 90);
-
-    // Нижняя строка - день недели
-    tft.setTextColor(TFT_WHITE);
-    tft.setTextSize(1);
-    tft.drawString(currentDay, 120, 120);
-
-    // Обновляем последние значения
     lastRTCTime = currentTime;
     lastRTCDay = currentDay;
+    lastRTCDate = currentDate;
+  } else {
+    // Обновляем только дату если она изменилась
+    if (currentDate != lastRTCDate) {
+      updateLine4Only(currentDate.c_str(), TFT_YELLOW);
+      lastRTCDate = currentDate;
+    }
   }
 }
 
 void drawLargeDigitalClock(bool forceUpdate) {
   String currentTime = getRTCTime();
-  bool needsUpdate = forceUpdate || currentTime != lastRTCTime;
-
-  if (needsUpdate) {
+  String currentDate = getRTCDate();
+  
+  bool timeChanged = (currentTime != lastRTCTime);
+  bool dateChanged = (currentDate != lastRTCDate);
+  
+  if (forceUpdate || timeChanged) {
     tft.fillScreen(TFT_BLACK);
     
-    // ИСПРАВЛЕНИЕ 1: Уменьшаем шрифт с 6 до 4 и показываем полное время с секундами
+    // Крупные цифровые часы
     tft.setTextDatum(MC_DATUM);
     tft.setTextColor(TFT_CYAN);
-    tft.setTextSize(4); // УМЕНЬШЕН РАЗМЕР ШРИФТА ДО 4 (было 6)
-    
-    // Рисуем полное время с секундами "HH:MM:SS" по центру экрана
+    tft.setTextSize(4);
     tft.drawString(currentTime, 120, 120);
     
     lastRTCTime = currentTime;
+  }
+  
+  // Дата обновляется отдельно
+  if (forceUpdate || dateChanged) {
+    updateLine4Only(currentDate.c_str(), TFT_YELLOW);
+    lastRTCDate = currentDate;
   }
 }
 
@@ -346,8 +475,6 @@ void drawClockFace() {
       tft.drawLine(innerX, innerY, outerX, outerY, TFT_DARKGREY);
     }
   }
-  
-  // УБРАНА НАДПИСЬ РЕЖИМА ПОД ЧАСАМИ
 }
 
 void updateAnalogClock() {
@@ -355,39 +482,43 @@ void updateAnalogClock() {
   
   DateTime now = rtc.now();
   
+  // Обновляем только если секунда изменилась
+  static uint8_t lastSecond = 255;
+  if (now.second() == lastSecond) return;
+  lastSecond = now.second();
+  
   // Стираем старые стрелки
   tft.drawLine(CLOCK_CENTER_X, CLOCK_CENTER_Y, last_hx, last_hy, TFT_BLACK);
-  tft.drawLine(CLOCK_CENTER_X, CLOCK_CENTER_Y, last_mx, last_my, TFT_BLACK);
+  tft.drawLine(CLOCK_CENTER_X, CLOCK_CENTER_Y, last_mx, last_my, TFT_BLACK); 
   tft.drawLine(CLOCK_CENTER_X, CLOCK_CENTER_Y, last_sx, last_sy, TFT_BLACK);
   
   // Стираем старую секундную точку
   drawDotAtSecond((now.second() == 0) ? 59 : now.second() - 1, TFT_BLACK);
   
-  // Часовая стрелка
+  // Расчет новых позиций стрелок
   float hourAngle = (now.hour() % 12 + now.minute() / 60.0) * PI / 6;
   last_hx = CLOCK_CENTER_X + CLOCK_RADIUS * 0.5 * sin(hourAngle);
   last_hy = CLOCK_CENTER_Y - CLOCK_RADIUS * 0.5 * cos(hourAngle);
   
-  // Минутная стрелка
   float minAngle = now.minute() * PI / 30;
   last_mx = CLOCK_CENTER_X + CLOCK_RADIUS * 0.7 * sin(minAngle);
   last_my = CLOCK_CENTER_Y - CLOCK_RADIUS * 0.7 * cos(minAngle);
   
-  // Секундная стрелка
   float secAngle = now.second() * PI / 30;
   last_sx = CLOCK_CENTER_X + CLOCK_RADIUS * 0.8 * sin(secAngle);
   last_sy = CLOCK_CENTER_Y - CLOCK_RADIUS * 0.8 * cos(secAngle);
   
   // Рисуем новые стрелки
-  tft.drawLine(CLOCK_CENTER_X, CLOCK_CENTER_Y, last_hx, last_hy, TFT_WHITE); // Часовая - белая
-  tft.drawLine(CLOCK_CENTER_X, CLOCK_CENTER_Y, last_mx, last_my, TFT_CYAN);  // Минутная - голубая
-  
-  // ИСПРАВЛЕНИЕ 3: Сначала рисуем секундную точку, потом секундную стрелку
-  // Рисуем текущую секундную точку ПЕРЕД секундной стрелкой
-  drawDotAtSecond(now.second(), TFT_RED);
-  
-  // Теперь рисуем секундную стрелку ПОВЕРХ точки
-  tft.drawLine(CLOCK_CENTER_X, CLOCK_CENTER_Y, last_sx, last_sy, TFT_RED);   // Секундная - красная
+  tft.drawLine(CLOCK_CENTER_X, CLOCK_CENTER_Y, last_hx, last_hy, TFT_WHITE);
+  tft.drawLine(CLOCK_CENTER_X, CLOCK_CENTER_Y, last_mx, last_my, TFT_CYAN);
+  tft.drawLine(CLOCK_CENTER_X, CLOCK_CENTER_Y, last_sx, last_sy, TFT_RED);
+
+  // Обновляем дату только если она изменилась
+  String currentDate = getRTCDate();
+  if (currentDate != lastRTCDate) {
+    updateLine4Only(currentDate.c_str(), TFT_YELLOW);
+    lastRTCDate = currentDate;
+  }
 }
 
 void drawDotAtSecond(uint8_t sec, uint16_t color) {
@@ -550,7 +681,7 @@ void showSplashScreen(String modeName) {
 }
 
 // ---------------------------------------------------------------------
-//                           TEST MODE FUNCTIONS
+//                    ОПТИМИЗИРОВАННЫЙ TEST РЕЖИМ
 // ---------------------------------------------------------------------
 void initializeTestMode() {
   // Подключаемся к WiFi для теста
@@ -603,29 +734,27 @@ void updateTestInfo(bool forceUpdate) {
   String currentIPAddress = getIPAddress();
   String currentNetworkTime = getNetworkTime();
 
-  bool needsUpdate = forceUpdate || 
-                    currentWiFiSSID != lastWiFiSSID || 
-                    currentIPAddress != lastIPAddress || 
-                    currentNetworkTime != lastNetworkTime;
+  bool ssidChanged = (currentWiFiSSID != lastWiFiSSID);
+  bool ipChanged = (currentIPAddress != lastIPAddress);
+  bool timeChanged = (currentNetworkTime != lastNetworkTime);
 
-  if (needsUpdate) {
-    tft.fillRect(0, 70, 240, 80, TFT_BLACK);
+  if (forceUpdate || ssidChanged || ipChanged) {
+    // Перерисовываем только если изменились SSID или IP
+    drawUnifiedScreen(
+      currentWiFiSSID.c_str(),
+      ("IP: " + currentIPAddress).c_str(), 
+      currentNetworkTime.c_str(),
+      wifiConnected ? TFT_GREEN : TFT_ORANGE,
+      true,
+      forceUpdate
+    );
 
-    tft.setTextDatum(MC_DATUM);
-    
-    // Верхняя строка - название WiFi сети
-    tft.setTextColor(wifiConnected ? TFT_GREEN : TFT_RED);
-    tft.setTextSize(2);
-    tft.drawString(currentWiFiSSID, 120, 90);
-
-    // Нижняя строка - IP адрес
-    tft.setTextColor(wifiConnected ? TFT_CYAN : TFT_WHITE);
-    tft.setTextSize(1);
-    tft.drawString("IP: " + currentIPAddress, 120, 120);
-
-    // Обновляем последние значения
     lastWiFiSSID = currentWiFiSSID;
     lastIPAddress = currentIPAddress;
+    lastNetworkTime = currentNetworkTime;
+  } else if (timeChanged) {
+    // Если изменилось только время - обновляем только строку 4
+    updateLine4Only(currentNetworkTime.c_str(), wifiConnected ? TFT_GREEN : TFT_ORANGE);
     lastNetworkTime = currentNetworkTime;
   }
 }
@@ -652,89 +781,54 @@ void initializeAudioForCurrentMode() {
 }
 
 // ---------------------------------------------------------------------
-//                            DRAW TRACK INFO
+//                    ОПТИМИЗИРОВАННЫЙ RADIO РЕЖИМ
 // ---------------------------------------------------------------------
 void updateTrackInfo(bool forceUpdate) {
   if (menuVisible || currentMode != MODE_RADIO) return;
 
-  if (forceUpdate || currentTrack != lastTrack || currentStation != lastStation) {
-    tft.fillRect(0, 70, 240, 80, TFT_BLACK);
-
-    tft.setTextDatum(MC_DATUM);
-    tft.setTextColor(TFT_CYAN);
-    tft.setTextSize(2);
-    tft.drawString(currentStation, 120, 90);
-
-    tft.setTextColor(TFT_WHITE);
-    tft.setTextSize(1);
-    
+  bool stationChanged = (currentStation != lastStation);
+  bool trackChanged = (currentTrack != lastTrack);
+  
+  if (forceUpdate || stationChanged || trackChanged) {
     String displayTrack = currentTrack;
     if (displayTrack.length() > 30) {
       displayTrack = displayTrack.substring(0, 30) + "...";
     }
-    tft.drawString(displayTrack, 120, 120);
+    
+    drawUnifiedScreen(
+      currentStation.c_str(),
+      displayTrack.c_str(),
+      muted ? "MUTED" : ("VOL: " + String(volume)).c_str(),
+      muted ? TFT_RED : TFT_YELLOW,
+      true,
+      forceUpdate
+    );
 
-    lastTrack = currentTrack;
     lastStation = currentStation;
+    lastTrack = currentTrack;
   }
 }
 
 // ---------------------------------------------------------------------
-//                           UPDATE VOLUME DISPLAY
+//                    ОПТИМИЗИРОВАННОЕ ОБНОВЛЕНИЕ ГРОМКОСТИ
 // ---------------------------------------------------------------------
 void updateVolumeDisplay(bool forceUpdate) {
   if (menuVisible) return;
   
-  if (currentMode == MODE_TEST) {
-    // В TEST режиме проверяем изменения времени
-    String currentTime = getNetworkTime();
-    bool timeChanged = (currentTime != lastNetworkTime);
+  if (forceUpdate || volume != lastVolume || muted != lastMute) {
+    String volumeText = muted ? "MUTED" : ("VOL: " + String(volume));
     
-    if (forceUpdate || timeChanged) {
-      tft.fillRect(0, 165, 240, 25, TFT_BLACK);
-      
-      tft.setTextDatum(MC_DATUM);
-      tft.setTextSize(2);
-      tft.setTextColor(wifiConnected ? TFT_GREEN : TFT_ORANGE);
-      tft.drawString(currentTime, 120, 180);
-      
-      lastNetworkTime = currentTime;
+    if (currentMode == MODE_RADIO || currentMode == MODE_BLUETOOTH || currentMode == MODE_AP) {
+      // Для этих режимов обновляем только строку 4
+      updateLine4Only(volumeText.c_str(), muted ? TFT_RED : TFT_YELLOW);
+    } else if (currentMode == MODE_TEST) {
+      // TEST режим уже обновляет время в своей функции
+      // Ничего не делаем здесь
     }
-  }
-  else if (currentMode == MODE_CLOCK) {
-    // В CLOCK режиме показываем дату вместо громкости
-    String currentDate = getRTCDate();
-    bool dateChanged = (currentDate != lastRTCDate);
+    // CLOCK режим обновляет дату в своих функциях
     
-    if (forceUpdate || dateChanged) {
-      tft.fillRect(0, 165, 240, 25, TFT_BLACK);
-      
-      tft.setTextDatum(MC_DATUM);
-      tft.setTextSize(2);
-      tft.setTextColor(TFT_YELLOW);
-      tft.drawString(currentDate, 120, 180);
-      
-      lastRTCDate = currentDate;
-    }
-  }
-  else {
-    // В других режимах проверяем изменения громкости
-    if (forceUpdate || volume != lastVolume || muted != lastMute) {
-      tft.fillRect(0, 165, 240, 25, TFT_BLACK);
-      
-      tft.setTextDatum(MC_DATUM);
-      tft.setTextSize(2);
-      
-      if (muted) {
-        tft.setTextColor(TFT_RED);
-      } else {
-        tft.setTextColor(TFT_YELLOW);
-      }
-      tft.drawString("VOL: " + String(volume), 120, 180);
-
-      lastVolume = volume;
-      lastMute = muted;
-    }
+    lastVolume = volume;
+    lastMute = muted;
   }
 }
 
@@ -744,66 +838,55 @@ void updateVolumeDisplay(bool forceUpdate) {
 void drawCurrentModeScreen(bool forceUpdate) {
   if (!forceUpdate && currentMode == lastMode && menuVisible == lastMenuVisible) return;
   
-  tft.fillScreen(TFT_BLACK);
-  tft.setTextDatum(MC_DATUM);
-
-  int iconY = 40;
-  
   switch(currentMode) {
     case MODE_RADIO:
       if (wifiConnected) {
-        int rssi = WiFi.RSSI();
-        int bars = rssiToBars(rssi);
-        drawWiFiIcon(120, iconY, bars, false);
+        updateTrackInfo(true);
       } else {
-        drawWiFiIcon(120, iconY, 0, false);
+        drawUnifiedScreen(
+          "RADIO",                      // Строка 2: режим
+          "Connecting to WiFi...",      // Строка 3: статус
+          muted ? "MUTED" : ("VOL: " + String(volume)).c_str(), // Строка 4: громкость
+          muted ? TFT_RED : TFT_YELLOW,
+          true,
+          true
+        );
       }
-      updateTrackInfo(true);
       break;
       
     case MODE_BLUETOOTH:
-      drawBluetoothIcon(120, iconY);
-      tft.setTextColor(TFT_WHITE);
-      tft.setTextSize(2);
-      tft.drawString("BLUETOOTH", 120, 90);
-      tft.setTextColor(TFT_GREEN);
-      tft.setTextSize(1);
-      tft.drawString("Audio Ready", 120, 120);
+      drawUnifiedScreen(
+        "BLUETOOTH",                   // Строка 2: режим
+        "Audio Ready",                 // Строка 3: статус
+        muted ? "MUTED" : ("VOL: " + String(volume)).c_str(), // Строка 4: громкость
+        muted ? TFT_RED : TFT_YELLOW,
+        true,
+        true
+      );
       break;
       
     case MODE_CLOCK:
-      drawClockIcon(120, iconY);
-      tft.setTextColor(TFT_GREEN);
-      tft.setTextSize(3);
-      tft.drawString("CLOCK", 120, 90);
-      
       // Сбрасываем режим отображения при входе в CLOCK режим
       currentClockMode = CLOCK_NORMAL;
       lastClockMode = CLOCK_NORMAL;
-      
       updateClockDisplay(true);
       break;
       
     case MODE_AP:
-      drawAPModeIcon(120, iconY);
-      tft.setTextColor(TFT_WHITE);
-      tft.setTextSize(2);
-      tft.drawString("AP MODE", 120, 90);
-      tft.setTextColor(TFT_GREEN);
-      tft.setTextSize(1);
-      tft.drawString("Access Point Mode", 120, 120);
+      drawUnifiedScreen(
+        "AP MODE",                     // Строка 2: режим
+        "Access Point Mode",           // Строка 3: описание
+        "192.168.4.1",                 // Строка 4: IP
+        TFT_CYAN,
+        true,
+        true
+      );
       break;
       
     case MODE_TEST:
-      drawTestIcon(120, iconY);
-      tft.setTextColor(TFT_WHITE);
-      tft.setTextSize(2);
-      tft.drawString("TEST", 120, 90);
       updateTestInfo(true);
       break;
   }
-
-  updateVolumeDisplay(true);
 
   lastMode = currentMode;
   lastMenuVisible = menuVisible;
@@ -890,7 +973,7 @@ void drawMenu() {
   int currentModeIndex = getCurrentModeIndex();
   
   for (int i = 0; i < menuSize; i++) {
-    int yPos = 40 + i * 40;
+    int yPos = 20 + i * 40; // ПОДНЯТО НА 10 ПИКСЕЛЕЙ ВВЕРХ (было 40 + i * 40)
     
     if (i == currentMenuSelection) {
       tft.fillRect(0, yPos - 18, 240, 36, TFT_NAVY);
@@ -994,6 +1077,9 @@ void audio_showstation(const char *info) {
 void audioTask(void* parameter) {
   unsigned long lastWiFiReconnect = 0; // Добавляем таймер для WiFi
   
+  // Заменяем poll на WiFi.onEvent для обработки WiFi событий
+  WiFi.onEvent(wifi_event_handler);
+  
   for (;;) {
     if (currentMode == MODE_RADIO) {
       // ИСПРАВЛЕНИЕ 2: Проверяем WiFi только раз в 10 секунд вместо постоянных проверок
@@ -1028,6 +1114,15 @@ void uiTask(void* parameter) {
 
   for (;;) {
     bool changed = false;
+
+    // Обработка уведомлений от WiFi событий для перерисовки RSSI
+    uint32_t notificationValue;
+    if (xTaskNotifyWait(0x00, ULONG_MAX, &notificationValue, 0) == pdTRUE) {
+      // WiFi статус изменился - перерисовываем экран если в RADIO режиме
+      if (currentMode == MODE_RADIO && !menuVisible) {
+        drawCurrentModeScreen(true);
+      }
+    }
 
     // Обработка кнопок
     if (digitalRead(VOL_UP_PIN) == LOW) {
@@ -1109,7 +1204,6 @@ void uiTask(void* parameter) {
     if (currentMode == MODE_CLOCK && !menuVisible) {
       if (millis() - lastClockRefresh >= 1000) {
         updateClockDisplay(false);
-        updateVolumeDisplay(false); // Обновляем дату в строке громкости
         lastClockRefresh = millis();
       }
     }
@@ -1117,7 +1211,6 @@ void uiTask(void* parameter) {
     // Обновление TEST режима
     if (currentMode == MODE_TEST && !menuVisible) {
       updateTestInfo(false);
-      updateVolumeDisplay(false);
     }
     // Обновление RADIO режима
     else if (currentMode == MODE_RADIO && !menuVisible && (changed || lastVolume != volume || lastMute != muted)) {
